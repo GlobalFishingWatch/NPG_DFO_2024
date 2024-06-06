@@ -1,0 +1,24 @@
+
+```{r}
+install.packages(c('DBI', 'bigrquery')) # already installed by fishwatchr
+library(DBI)
+library(bigrquery)
+
+install.packages("bigrquery")
+library(bigrquery)
+install.packages("dplyr")
+library(dplyr)
+library(fishwatchr)
+
+con <- DBI::dbConnect(bigrquery::bigquery(), 
+                      project = "world-fishing-827", 
+                      use_legacy_sql = FALSE)
+
+```
+
+
+```{r}
+NPG_vessels_march_june <- read.csv2(file = here::here("data", "GFW_vesselpresence_mar1-june6.csv"), sep = ",",)
+
+```
+
