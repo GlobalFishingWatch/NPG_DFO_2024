@@ -4,19 +4,19 @@ install.packages(c('DBI', 'bigrquery')) # already installed by fishwatchr
 library(DBI)
 library(bigrquery)
 
-install.packages("bigrquery")
+# install.packages("bigrquery")
 library(bigrquery)
-install.packages("dplyr")
+# install.packages("dplyr")
 library(dplyr)
 library(fishwatchr)
 install.packages("remotes")
 remotes::install_github("GlobalFishingWatch/gfwr@develop")
+# install.packages("gfwr")
+library(gfwr)
 
-install.packages("sf")
+# install.packages("sf")
 library(sf)
 
-install.packages("gfwr")
-library(gfwr)
 
 con <- DBI::dbConnect(bigrquery::bigquery(), 
                       project = "world-fishing-827", 
@@ -30,6 +30,7 @@ NPG_vessels_march_june <- read.csv2(file = here::here("data", "GFW_vesselpresenc
 
 
 # try pulling vessel ids using gfwr
+install.packages("geojsonR")
 library(geojsonR)
 
 NPG_AOI <- sf::st_read( dsn = here::here("data", "NPGgeometry.geojson" ))
@@ -38,8 +39,11 @@ NPG_AOI <- sf::st_read( dsn = here::here("data", "geometry_test.geojson" ))
 
 # file_js = FROM_GeoJson(url_file_string = "feature_collection.geojson")
 
+geojson_tagged <- gfwr::sf_to_geojson(NPG_AOI %>% dplyr::select(-bbox))
+
 # The user-defined geojson has to be surrounded by a geojson tag, that can be created using a simple paste:
-geojson_tagged <- paste0('{"geojson":', NPG_AOI,'}')
+# dont need to do with gfwr
+# geojson_tagged <- paste0('{"geojson":', NPG_AOI,'}')
 
 NPG <- get_raster(spatial_resolution = "LOW",
            temporal_resolution = "DAILY",
