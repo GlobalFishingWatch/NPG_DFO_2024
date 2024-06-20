@@ -4,15 +4,10 @@ install.packages(c('DBI', 'bigrquery')) # already installed by fishwatchr
 library(DBI)
 library(bigrquery)
 
-# install.packages("bigrquery")
-library(bigrquery)
 # install.packages("dplyr")
 library(dplyr)
-library(fishwatchr)
-install.packages("remotes")
-remotes::install_github("GlobalFishingWatch/gfwr@develop")
-# install.packages("gfwr")
 library(gfwr)
+library(ggplot2)
 
 # install.packages("sf")
 library(sf)
@@ -30,20 +25,17 @@ NPG_vessels_march_june <- read.csv2(file = here::here("data", "GFW_vesselpresenc
 
 
 # try pulling vessel ids using gfwr
-install.packages("geojsonR")
-library(geojsonR)
 
 NPG_AOI <- sf::st_read( dsn = here::here("data", "NPGgeometry.geojson" ))
 NPG_AOI <- sf::st_read( dsn = here::here("data", "geometry_test.geojson" ))
+
 # INPUT IS A PATH TO A FILE
 
-# file_js = FROM_GeoJson(url_file_string = "feature_collection.geojson")
-
-geojson_tagged <- gfwr::sf_to_geojson(NPG_AOI %>% dplyr::select(-bbox))
-
 # The user-defined geojson has to be surrounded by a geojson tag, that can be created using a simple paste:
-# dont need to do with gfwr
-# geojson_tagged <- paste0('{"geojson":', NPG_AOI,'}')
+
+# geojson_tagged <- paste0('{"geojson":', NPG_AOI,'}') # in documentation but nate provided other way
+
+geojson_tagged <- gfwr::sf_to_geojson(NPG_AOI %>% dplyr::select(-bbox)) # nate's recommendation
 
 NPG <- get_raster(spatial_resolution = "LOW",
            temporal_resolution = "DAILY",
@@ -52,5 +44,93 @@ NPG <- get_raster(spatial_resolution = "LOW",
            region = geojson_tagged,
            region_source = "USER_JSON",
            key = gfw_auth())
+
+
+
+NPG %>% select("Vessel ID", "Flag", "Vessel Name", "Gear Type", "Vessel Type", "MMSI", "IMO")
+```
+```{r}
+#look at overlap between original and better query
+
+jun1_6_vessels_new <- read.csv2(file = here::here("data", "GFW_AOI_list_new_jun1-6.csv"), sep = ",",)
+jun1_6_vessels_old <- read.csv2(file = here::here("data", "GFW_AOI_list_old_jun1-6.csv"), sep = ",",)
+jun10_16_vessels <- read.csv2(file = here::here("data", "GFW_AOI_list_jun10-16.csv"), sep = ",",)
+
+setdiff(jun1_6_vessels_new$ssvid, jun1_6_vessels_old$ssvid)
+setdiff(jun1_6_vessels_old$ssvid, jun1_6_vessels_new$ssvid)
+setdiff(jun1_6_vessels_new$ssvid, jun10_16_vessels$ssvid)
+setdiff(jun10_16_vessels$ssvid, jun1_6_vessels_new$ssvid)
+
+# look at whether ssvid dupes
+jun1_6_vessels_new %>% group_by(ssvid) %>% summarise(n_ssvid = n()) %>% arrange(n_ssvid) %>% View()
+
+```
+
+```{r}
+
+"
+106000000,
+259023000,
+273214530,
+273290040,
+273312240,
+412080230,
+412327526,
+412329062,
+412329635,
+412330149,
+412331088,
+412331147,
+412336831,
+412337006,
+412347599,
+412349316,
+412349803,
+412420659,
+412420829,
+412420909,
+412421022,
+412422734,
+412439604,
+412440365,
+412440366,
+412440367,
+412440369,
+412549014,
+412549016,
+412549057,
+412549166,
+412549513,
+412549515,
+413459180,
+413558350,
+416001799,
+416002149,
+416002231,
+416002747,
+431000159,
+431002015,
+431003491,
+431046000,
+431069000,
+431171000,
+431200170,
+431426000,
+431501170,
+431579000,
+
+431602570,
+431693000,
+431704470,
+431769000,
+431795000,
+431903000,
+431914000,
+432138000,
+432288000,
+432561000,
+432776000,
+432907000
+"
 ```
 
