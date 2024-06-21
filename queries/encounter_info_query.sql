@@ -1,0 +1,300 @@
+--------------------------------------------------
+-- Query to pull encounters and associated info on voyage basis
+-- pull from voyage table output from patrol support query
+--------------------------------------------------
+
+# set last day of time window of interest for capping events
+CREATE TEMP FUNCTION  end_day() AS (TIMESTAMP('2024-06-16 23:59:59 UTC'));
+
+WITH
+----------------------------------------------------------
+-- pull relevant voyage info from starting table
+----------------------------------------------------------
+voyages AS (
+  SELECT
+    vessel_id,
+    ssvid,
+    shipname,
+    vessel_flag_best,
+    callsign,
+    imo,
+    vessel_class_best,
+    geartype_best,
+    -- vessel_class_initial,
+    -- class_confidence_initial,
+    trip_id,
+    trip_start,
+    -- trip_end,
+  FROM `scratch_joef.NPFC_vessels_Jun10-16`
+  ),
+
+----------------------------------------------------------
+-- pull encounters and associated info for voyages
+----------------------------------------------------------
+encounters AS (
+  SELECT
+    "Encounter" AS event_type,
+    enc.event_id,
+    voyages.ssvid,
+    voyages.shipname,
+    voyages.vessel_flag_best,
+    voyages.callsign,
+    voyages.imo,
+    voyages.vessel_class_best,
+    voyages.geartype_best,
+    -- voyages.vessel_class_initial,
+    -- voyages.class_confidence_initial,
+    voyages.trip_id,
+    enc.event_start,
+    enc.event_end,
+    enc.event_duration_hrs,
+    ROUND(enc.lat_mean, 2) AS lat_mean,
+    ROUND(enc.lon_mean, 2) AS lon_mean,
+    ROUND(CAST(enc.distance_km AS numeric), 1) AS distance_km,
+    ROUND(CAST(enc.speed_knots AS numeric), 1) AS speed_knots,
+    eez,
+    enc.major_fao,
+    enc.high_seas,
+    enc.rfmo,
+    ROUND(enc.start_distance_from_shore_km, 1) AS start_distance_from_shore_km,
+    -- ROUND(enc.end_distance_from_shore_km, 1) AS end_distance_from_shore_km,
+    -- ROUND(enc.start_distance_from_port_km, 1) AS start_distance_from_port_km,
+    -- ROUND(enc.end_distance_from_port_km, 1) AS end_distance_from_port_km,
+    enc.encountered_ssvid,
+    enc.encountered_vessel_id
+  FROM(
+    SELECT
+      event_id,
+      vessel_id,
+      ## extract information on vessel ssvid and vessel type
+      JSON_EXTRACT_SCALAR(event_vessels, "$[0].ssvid") as ssvid,
+      JSON_EXTRACT_SCALAR(event_vessels, "$[1].ssvid") as encountered_ssvid,
+      JSON_EXTRACT_SCALAR(event_vessels, "$[1].id") as encountered_vessel_id,
+      event_start,
+      event_end,
+      ROUND(TIMESTAMP_DIFF(event_end, event_start, minute) / 60, 3) AS event_duration_hrs,
+      lat_mean,
+      lon_mean,
+      JSON_EXTRACT_SCALAR(event_info, "$.median_distance_km") as distance_km,
+      JSON_EXTRACT_SCALAR(event_info, "$.median_speed_knots") as speed_knots,
+      ## pull out event regions
+      -- ARRAY_TO_STRING(regions_mean_position.eez, ", ") AS eez,
+      regions_mean_position.eez AS eez,
+      ARRAY_TO_STRING(regions_mean_position.major_fao, ", ") AS major_fao,
+      ARRAY_TO_STRING(regions_mean_position.high_seas, ", ") AS high_seas,
+      ARRAY_TO_STRING(regions_mean_position.rfmo, ", ") AS rfmo,
+      -- regions_mean_position.rfmo AS rfmo,
+      start_distance_from_shore_km,
+      FROM `pipe_ais_v3_published.product_events_encounter`
+      ) enc
+    INNER JOIN voyages
+      ON
+    enc.event_start BETWEEN voyages.trip_start AND end_day()
+    AND voyages.vessel_id = enc.vessel_id ),
+
+----------------------------------------------------------
+-- for encounters, add vessel info for encountered vessels
+----------------------------------------------------------
+encounter_v_info AS(
+  SELECT
+    events.*,
+    vi.shipname AS encountered_shipname,
+    vi.callsign AS encountered_callsign,
+    vi.imo AS encountered_imo,
+    vi.vessel_iso3 AS encountered_flag,
+    vi.vessel_class_best AS encountered_vessel_class,
+    vi.geartype AS encountered_geartype,
+  FROM(
+    SELECT
+      *,
+      EXTRACT(year FROM event_end) AS year
+    FROM encounters) events
+    LEFT JOIN (
+      SELECT
+        vessel_id,
+        ssvid,
+        year,
+        shipname,
+        callsign,
+        imo,
+        IFNULL(IFNULL(gfw_best_flag, core_flag), mmsi_flag) AS vessel_iso3,
+        prod_shiptype AS vessel_class_best,
+        prod_geartype AS geartype
+      FROM
+        `pipe_ais_v3_published.product_vessel_info_summary_v20240501`) vi
+      ON
+        events.encountered_vessel_id = vi.vessel_id AND events.year = vi.year),
+
+----------------------------------------------------------
+-- create column of eez isos that allows for joint/disputed areas w/ >1 eez per code
+----------------------------------------------------------
+eez_names AS (
+  SELECT
+    eez_id,
+    CASE
+      WHEN eez3 IS NOT NULL AND eez2 IS NOT NULL THEN CONCAT(eez1, "/", eez2, "/", eez3)
+      WHEN eez2 IS NOT NULL THEN CONCAT(eez1, "/", eez2)
+      ELSE eez1 END AS eez_name
+  FROM(
+    SELECT
+      CAST(eez_id AS STRING) AS eez_id,
+      sovereign1_iso3 AS eez1,
+      CASE WHEN sovereign2_iso3 = "NA" THEN null ELSE sovereign2_iso3 END AS eez2,
+      CASE WHEN sovereign3_iso3 = "NA" THEN null ELSE sovereign3_iso3 END AS eez3
+      -- reporting_name AS eez_name
+    FROM `gfw_research.eez_info`)),
+
+----------------------------------------------------------
+-- join eez info to codes in event table
+----------------------------------------------------------
+add_eez_info AS(
+  SELECT
+    encs.event_type,
+    encs.event_id,
+    encs.ssvid,
+    encs.shipname,
+    encs.vessel_flag_best,
+    encs.callsign,
+    encs.imo,
+    encs.vessel_class_best,
+    encs.geartype_best,
+    encs.trip_id,
+    encs.event_start,
+    encs.event_end,
+    encs.event_duration_hrs,
+    encs.lat_mean,
+    encs.lon_mean,
+    encs.distance_km,
+    encs.speed_knots,
+    -- encs.eez,
+    -- eez_id,
+    ARRAY_TO_STRING(ARRAY_AGG(eez_name ORDER BY eez_name), ", ") AS eez,
+    encs.major_fao,
+    encs.high_seas,
+    encs.rfmo,
+    encs.start_distance_from_shore_km,
+    encs.encountered_ssvid,
+    encs.encountered_vessel_id,
+    encs.year,
+    encs.encountered_shipname,
+    encs.encountered_callsign,
+    encs.encountered_imo,
+    encs.encountered_flag,
+    encs.encountered_vessel_class,
+    encs.encountered_geartype
+  FROM encounter_v_info AS encs
+  LEFT JOIN UNNEST (eez) AS eez_id
+  LEFT JOIN eez_names
+  USING (eez_id)
+  GROUP BY
+    event_type,
+    event_id,
+    ssvid,
+    shipname,
+    vessel_flag_best,
+    callsign,
+    imo,
+    vessel_class_best,
+    geartype_best,
+    trip_id,
+    event_start,
+    event_end,
+    event_duration_hrs,
+    lat_mean,
+    lon_mean,
+    distance_km,
+    speed_knots,
+    major_fao,
+    high_seas,
+    rfmo,
+    start_distance_from_shore_km,
+    encountered_ssvid,
+    encountered_vessel_id,
+    year,
+    encountered_shipname,
+    encountered_callsign,
+    encountered_imo,
+    encountered_flag,
+    encountered_vessel_class,
+    encountered_geartype
+)
+
+----------------------------------------------------------
+-- split rfmo strings into arrays, sort, then re-concatenate as strings
+----------------------------------------------------------
+SELECT
+  event_type,
+    event_id,
+    ssvid,
+    shipname,
+    vessel_flag_best,
+    callsign,
+    imo,
+    vessel_class_best,
+    geartype_best,
+    trip_id,
+    event_start,
+    event_end,
+    event_duration_hrs,
+    lat_mean,
+    lon_mean,
+    distance_km,
+    speed_knots,
+    eez,
+    major_fao,
+    CASE WHEN high_seas = "" THEN "N" ELSE "Y" END AS high_seas,
+    ARRAY_TO_STRING(ARRAY(select rfmos from UNNEST(rfmo) rfmos ORDER BY rfmos), ", ") AS rfmo,
+    start_distance_from_shore_km,
+    encountered_ssvid,
+    encountered_vessel_id,
+    year,
+    encountered_shipname,
+    encountered_callsign,
+    encountered_imo,
+    encountered_flag,
+    encountered_vessel_class,
+    encountered_geartype
+  FROM(
+  SELECT
+    event_type,
+    event_id,
+    ssvid,
+    shipname,
+    vessel_flag_best,
+    callsign,
+    imo,
+    vessel_class_best,
+    geartype_best,
+    trip_id,
+    event_start,
+    event_end,
+    event_duration_hrs,
+    lat_mean,
+    lon_mean,
+    distance_km,
+    speed_knots,
+    eez,
+    major_fao,
+    high_seas,
+    SPLIT(rfmo,', ') AS rfmo,
+    start_distance_from_shore_km,
+    encountered_ssvid,
+    encountered_vessel_id,
+    year,
+    encountered_shipname,
+    encountered_callsign,
+    encountered_imo,
+    encountered_flag,
+    encountered_vessel_class,
+    encountered_geartype
+  FROM add_eez_info
+  WHERE
+    vessel_class_best != 'gear' AND geartype_best != 'gear'
+    AND encountered_vessel_class != 'gear' AND encountered_geartype != 'gear'
+
+  )
+
+/*
+
+
+*/

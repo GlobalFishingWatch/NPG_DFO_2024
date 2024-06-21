@@ -1,3 +1,9 @@
+
+--- this query could be used to get raw encounter information directly from voyage query.
+-- Note however the alternative workflow is to take the voyage output and use in the
+-- encounter_info_query as done for port profiles
+
+
 --------------------------------------
   -- Query to identify fishing and carrier vessels in the NPG AOI.
   -- using geojson of npfc AOI to pull active vessels
@@ -11,13 +17,14 @@ CREATE TEMP FUNCTION  start_year() AS (2023);
 CREATE TEMP FUNCTION  end_year() AS (2024);
 
 ## set active period of interest
-CREATE TEMP FUNCTION  active_period_start() AS (TIMESTAMP('2024-06-10 00:00:00 UTC'));
-CREATE TEMP FUNCTION  active_period_end() AS (TIMESTAMP('2024-06-16 23:59:59 UTC'));
+CREATE TEMP FUNCTION  active_period_start() AS (TIMESTAMP('2024-05-01 00:00:00 UTC'));
+CREATE TEMP FUNCTION  active_period_end() AS (TIMESTAMP('2024-06-02 23:59:59 UTC'));
 
-## set the current/ending day to calculate voyage duration up to (GFW) real time AND to ensure no voyage starts after it (also need for events bounding)..
-CREATE TEMP FUNCTION  end_day() AS (TIMESTAMP('2024-06-16 23:59:59 UTC'));
+## set the current day to calculate voyage duration up to (GFW) real time AND to ensure no voyage starts after it..
+CREATE TEMP FUNCTION  current_day() AS (TIMESTAMP('2024-06-02 23:59:59 UTC'));
 
-CREATE TABLE `world-fishing-827.scratch_joef.NPFC_vessels_Jun10-16` AS
+-- CREATE TABLE `world-fishing-827.scratch_joef.NPFC_vessels_May1-Jun2` AS
+CREATE TABLE `world-fishing-827.scratch_joef.NPFC_encounters_May1-Jun2` AS
 
 --------------------------------------
 WITH
@@ -84,7 +91,7 @@ AOI_vessels AS(
       WHERE
         (trip_start >= voyage_start_date() OR trip_start IS NULL)
         AND trip_end IS NULL
-        AND trip_start <= end_day()
+        AND trip_start <= current_day()
         )
     INNER JOIN AOI_vessels
     USING
@@ -353,22 +360,28 @@ AOI_vessels AS(
 --------------------------------------
 -- pipe 3
 num_encounters AS (
-  SELECT
-    vessel_id,
-    trip_id,
-    COUNT(*) AS num_encounters
+  SELECT *
+  --   vessel_id,
+  --   trip_id,
+  --   COUNT(*) AS num_encounters
   FROM (
     SELECT
       vessel_id,
-      event_start,
-      event_end,
+      JSON_EXTRACT_SCALAR(event_vessels, "$[0].ssvid") as ssvid,
       JSON_EXTRACT_SCALAR(event_vessels, "$[0].type") as product_shiptype,
       -- ## encountered vessel information
       JSON_EXTRACT_SCALAR(event_vessels, "$[1].type") as enc_product_shiptype,
       JSON_EXTRACT_SCALAR(event_vessels, "$[1].id") as enc_product_vessel_id,
       JSON_EXTRACT_SCALAR(event_vessels, "$[1].ssvid") as enc_product_ssvid,
-      start_distance_from_shore_km
-    FROM `pipe_ais_v3_published.product_events_encounter`) enc
+      regions_mean_position.eez AS eez,
+      regions_mean_position.high_seas AS high_seas,
+      regions_mean_position.rfmo,
+      event_start,
+      event_end,
+      lat_mean,
+      lon_mean,
+      start_distance_from_shore_km,
+    FROM `pipe_ais_v3_published.product_events_encounter`)
     INNER JOIN (
       SELECT
         vessel_id,
@@ -377,278 +390,9 @@ num_encounters AS (
       FROM
         updated_pan_voyages) voyages
     USING (vessel_id)
-      WHERE event_start BETWEEN trip_start AND end_day()
+      WHERE event_start >= trip_start
       AND  product_shiptype != 'gear' AND enc_product_shiptype != 'gear'
-    GROUP BY
-       vessel_id, trip_id
-    ),
+    )
 
---------------------------------------
--- Identify how many loitering events occurred on each voyage
---------------------------------------
-  -- pipe3
-  num_loitering AS (
-    SELECT
-      vessel_id,
-      trip_id,
-      COUNT(*) AS num_loitering
-    FROM (
-      SELECT
-        vessel_id,
-        event_start
-      FROM
-        `pipe_ais_v3_published.product_events_loitering`
-      WHERE
-        seg_id IN (
-        SELECT
-          seg_id
-        FROM
-          `pipe_ais_v3_published.segs_activity`
-        WHERE
-          good_seg IS TRUE
-          AND overlapping_and_short IS FALSE)
-          AND SAFE_CAST(JSON_QUERY(event_info,"$.avg_distance_from_shore_km") AS FLOAT64) > 37.04 -- to match 20 nm rule used in map
-          AND SAFE_CAST(JSON_QUERY(event_info,"$.loitering_hours") AS FLOAT64) > 2
-          AND SAFE_CAST(JSON_QUERY(event_info,"$.avg_speed_knots") AS FLOAT64) < 2) a
-    INNER JOIN (
-      SELECT
-        vessel_id,
-        trip_id,
-        trip_start,
-        pan_crossing
-      FROM
-        updated_pan_voyages) b
-    USING
-      (vessel_id)
-    WHERE event_start BETWEEN trip_start AND end_day()
-    GROUP BY
-      vessel_id, trip_id
-      ),
 
---------------------------------------
--- Identify how many fishing events occurred on each voyage
---------------------------------------
--- pipe3
-  num_fishing AS(
-    SELECT
-      vessel_id,
-      trip_id,
-      COUNT(*) AS num_fishing
-    FROM (
-      SELECT
-        vessel_id,
-        event_start
-      FROM
-        `pipe_ais_v3_published.product_events_fishing`) a
-    INNER JOIN (
-      SELECT
-        vessel_id,
-        trip_id,
-        trip_start
-      FROM
-        updated_pan_voyages)
-    USING
-      (vessel_id)
-    WHERE event_start BETWEEN trip_start AND end_day()
-    GROUP BY
-      vessel_id, trip_id
-      ),
-
-  --------------------------------------
-  -- label voyage if it had at least
-  -- one encounter event
-  --------------------------------------
-  add_encounters AS (
-    SELECT
-      a.*,
-      b.num_encounters,
-    IF
-      (b.num_encounters > 0, TRUE, FALSE) AS had_encounter
-    FROM
-      updated_pan_voyages AS a
-    LEFT JOIN
-      num_encounters b
-    USING
-      (vessel_id,
-        trip_id)
-    GROUP BY
-      1,2,3,4,5,6,7,8,9,10,11,12,13,14,15),
-
---------------------------------------
--- label voyage if it had at least
--- one loitering event
---------------------------------------
-  add_loitering AS (
-    SELECT
-      c.*,
-      d.num_loitering,
-    IF
-      (d.num_loitering > 0, TRUE, FALSE) AS had_loitering
-    FROM
-      add_encounters c
-    LEFT JOIN
-      num_loitering d
-    USING
-      (vessel_id,
-        trip_id)
-    GROUP BY
-      1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17),
-
---------------------------------------
--- label voyage if it had at least
--- one fishing event
---------------------------------------
-  add_fishing AS (
-    SELECT
-      e.*,
-      f.num_fishing,
-    IF
-      (f.num_fishing > 0, TRUE, FALSE) AS had_fishing
-    FROM
-      add_loitering AS e
-    LEFT JOIN
-      num_fishing f
-    USING
-      (vessel_id,
-        trip_id)
-    GROUP BY
-      1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19),
-
---------------------------------------
--- Identify vessel ids with less than
--- one position per two days and
--- no identity information.
---
--- Justification: there are some
--- vessels that have vessel_ids with
--- no identity information, but which
--- represent a quality track.
---------------------------------------
-  poor_vessel_ids AS (
-    SELECT
-      *,
-    IF
-      (SAFE_DIVIDE(pos_count,TIMESTAMP_DIFF(last_timestamp, first_timestamp, DAY)) < 0.5
-        AND (shipname.value IS NULL
-          AND callsign.value IS NULL
-          AND imo.value IS NULL), TRUE, FALSE) AS poor_id
-    FROM
-      `pipe_ais_v3_published.vessel_info` ),
-
---------------------------------------
--- add trip duration and label 'poor id' vessels
---------------------------------------
-  vessel_voyages AS (
-    SELECT
-      *,
-      ROUND(TIMESTAMP_DIFF(end_day(), trip_start, HOUR)/24, 2) AS trip_duration_days,
-      CASE WHEN vessel_id IN(SELECT vessel_id FROM poor_vessel_ids WHERE poor_id IS TRUE) THEN TRUE ELSE FALSE END AS poor_id
-    FROM
-      add_fishing
-        ),
-
---------------------------------------
--- all qualifying voyages
---------------------------------------
-  all_voyages AS (
-    SELECT
-      2024 AS year,
-      ssvid,
-      vessel_id,
-      vessel_iso3,
-      vessel_class,
-      gear_type,
-      trip_id,
-      trip_start,
-      start_iso3 AS start_port_iso3,
-      start_label AS start_port_label,
-      trip_start_confidence,
-      trip_duration_days,
-      poor_id,
-      num_encounters,
-      num_loitering,
-      num_fishing
-    FROM
-      vessel_voyages
-        ),
-
---------------------------------------
--- add vessel info from all_vessels table
-
--- note, depending on specific query, there may be
--- additional vessels dropped here that are not
--- present in all_vessels_byyear (compare to previous subquery)
---------------------------------------
-  add_vessel_info AS (
-    SELECT * FROM(
-    SELECT
-      vessel_id,
-      year,
-      vessel_class AS origin_list,
-      trip_id,
-      trip_start,
-      start_port_iso3,
-      start_port_label,
-      trip_start_confidence,
-      trip_duration_days,
-      poor_id,
-      num_encounters,
-      num_loitering,
-      num_fishing
-    FROM all_voyages )
-    JOIN (
-      SELECT
-        vessel_id,
-        ssvid,
-        year,
-        shipname,
-        callsign,
-        imo,
-        gfw_best_flag AS vessel_flag_best,
-        prod_shiptype AS vessel_class_best,
-        prod_geartype AS geartype_best
-      FROM
-        `pipe_ais_v3_published.product_vessel_info_summary_v20240501`)
-      USING
-        (vessel_id, year)),
-
---------------------------------------
--- organize table, there are instances of multiple ssvids per vessel_id, but trips are different (not duplicated).
--- possible that spoofing or that the return visit wasn't recorded
---------------------------------------
-  clean_info AS(
-    SELECT
-      CASE WHEN ssvid IN ("412549267","352182000","412420954","412420956","412421009","412421008","412421012","412421011","412209139","412209142","412421035","412421036","412421076","412209136","412421075","413205170","413205180","412420952","412421024","412549556","412200083","416037500","273354460","273335230","416240500","416248800","416046500","576990000","577079000","416002174","416002998","416000369","416002147","416000275","416002149","416002231","416002222","416002201","416000206","416001054","416000833","416217800","416227600","416002445","416000993","416000855","416004329","416000141","416000411","416225800","416002096","416001233","416002826","416002643","416002724","416002194","416000013","416000139","416001799","412331087","412329655","412329656","412329657","412329658","412331054","412331055","412331088","576770000","431601150","431001079","431501883","431200070","412450001","412549375","412677240","412677270","412440029","412440031","412440032","412440548","412440549","412440691","412440692","412440693","412440694","412440695","412549363","412549364","412549365","412549366","412549367","412549368","412549369","412549371","412549372","412549373","412549374","412549386","412549387","412549388","412549389","412549391","412549392","412549393","412549394","412440697","412440698","412440792","412440793","412440794","412440795","412677070","412440004","412440834","412440723","412440493","457178000","412671880","412401260","412420829","412420829","412420209","412420211","412672220","412672210","412672170","412672160","412672130","412672120","412672040","412672030","412672020","412671990","412671980","412420908","412420912","412671930","412671920","412671910","412671890","412401250","412671870","412420872","412420873","412420978","412420982","412421044","412421043","412421042","412421039","412421139","412421146","412421038","412421037","412549082","412549083","412549084","412549085","412549086","412690730","412690720")
-      OR
-      imo IN ("9974735","9677595","8786777","8786789","8786480","8786492","8786507","8786519","8540238","8540252","8786806","8786820","8788062","8567303","8540525","8788074","8537360","8549636","8786791","8786521","8607244","8724339","8813582","8655291","8703529","8747977","8676635","9766724","8655605","9694220","9688740","8540991","8539930","8550386","8539849","8540111","8540472","8539887","8534423","8551249","8530972","8792714","8793524","8554370","8530984","8534473","8554356","8554394","8794059","8550879","8550946","8542690","8549832","8342179","8792752","8342155","8542781","8543101","8550702","8550934","8550867","8685478","9717448","9717450","9717462","9717474","9752929","9752931","9769556","8996114","8344567","8344206","8344218","8343721","X3754182","9934589","7815246","8403698","8820509","9031947","9016571","9828704","9828716","9872561","9872573","9888273","9888285","9888297","9934503","9933717","9933729","9933731","9934515","9934527","9934539","9934541","9934553","9934565","9934577","9940497","9940538","9940540","9940552","9940576","9940590","9940617","9940629","9870111","9870587","9870599","9916692","9916654","9916707","9916721","9096507","8414295","9920954","9897066","8790596","8994013","9204087","8783373","8783385","8783426","9160097","8708294","8911047","8783127","8783139","8783141","8783153","8783165","8783177","8783189","8783191","8783232","8783244","8783256","8783268","8783270","8783282","8783294","8783309","8783311","8775170","8775182","8783323","8783335","8783347","8783359","8783361","8783397","8775156","8775168","8783402","8783414","9819569","9819571","9819583","9819595","9861110","9861122","9819600","9819612","9888247","9888417","9888259","9888261","9888431","8774877","8774865")
-      THEN TRUE ELSE FALSE END AS DFO_VOI,
-      ssvid,
-      imo,
-      poor_id,
-      vessel_id,
-      shipname,
-      callsign,
-      vessel_flag_best,
-      vessel_class_best,
-      geartype_best,
-      trip_id,
-      trip_start,
-      start_port_iso3,
-      start_port_label,
-      trip_start_confidence,
-      trip_duration_days,
-      CASE WHEN num_encounters IS NULL THEN 0 ELSE num_encounters END AS num_encounters,
-      CASE WHEN num_loitering IS NULL THEN 0 ELSE num_loitering END AS num_loitering,
-      CASE WHEN num_fishing IS NULL THEN 0 ELSE num_fishing END AS num_fishing
-    FROM add_vessel_info)
-
-  SELECT
-  *
-  FROM
-  clean_info
-  WHERE (vessel_class_best IN ("fishing", "carrier") OR DFO_VOI IS TRUE)
-      AND
-      (poor_id IS false)--  OR DFO_VOI IS TRUE) -- only poor_ids that were included were duplicates anyway, so just removing them all
-    ORDER BY ssvid
-     /*
-*/
+    select * from num_encounters
