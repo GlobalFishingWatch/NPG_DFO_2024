@@ -48,6 +48,7 @@ active_vessel_ids AS (
   FROM `world-fishing-827.pipe_ais_v3_published.messages`
 
     WHERE timestamp >= active_period_start() AND timestamp <= active_period_end()
+    AND clean_segs IS TRUE
   # Filter to polygon using ST_CONTAINS.
   # You need to create a geometry object for each position using ST_GEOPOINT
   AND ST_CONTAINS((SELECT NPFC_geojson FROM AOI), ST_GEOGPOINT(lon, lat))
