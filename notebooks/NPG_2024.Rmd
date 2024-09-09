@@ -1,5 +1,5 @@
 ```{r}
-install.packages(c('DBI', 'bigrquery')) # already installed by fishwatchr
+# install.packages(c('DBI', 'bigrquery')) # already installed by fishwatchr
 library(DBI)
 library(bigrquery)
 
@@ -71,6 +71,17 @@ jun1_6_vessels_new %>% group_by(ssvid) %>% summarise(n_ssvid = n()) %>% arrange(
 
 # Round 2 - Aug-Sept 2024
 
+## import table from BQ
+```{r}
+
+NPFC_vessels_jul22_aug26 <- fishwatchr::gfw_query(query = 
+                                                "SELECT * 
+                                                FROM `world-fishing-827.scratch_joef.NPFC_vessels_jul22-aug26`"
+                                                    , run_query = TRUE, con = con)$data
+
+
+```
+
 ## comparing vessel lists from round 1 to 2 and some metrics
 ```{r}
 
@@ -91,4 +102,22 @@ may1_jun1_vessels <- unique(may1_jun1_vessels$MMSI)
 setdiff(may1_jun1_vessels, jul18_aug19_vessels) #42
 setdiff(jul18_aug19_vessels, may1_jun1_vessels) #327
 
+
 ```
+Ports of interest
+```{r}
+Iturup island:
+RUS-291 / RUS-6376934 - 
+KURILSK / RUS-5728019 
+
+Kunashir Island:
+YUZHO KURILSK / RUS-1526669
+
+Shikotan Island:
+MALOKURILSK / RUS-7693851
+KRABOZAVODSK / RUS-8782954
+
+
+```
+
+
