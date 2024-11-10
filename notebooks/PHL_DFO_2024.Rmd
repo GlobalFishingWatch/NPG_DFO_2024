@@ -1,0 +1,260 @@
+# ```{r}
+# # install.packages(c('DBI', 'bigrquery')) # already installed by fishwatchr
+# library(DBI)
+# library(bigrquery)
+# 
+# # install.packages("dplyr")
+# library(dplyr)
+# library(gfwr)
+# library(ggplot2)
+# 
+# # install.packages("sf")
+# library(sf)
+# 
+# 
+# con <- DBI::dbConnect(bigrquery::bigquery(), 
+#                       project = "world-fishing-827", 
+#                       use_legacy_sql = FALSE)
+# 
+# ```
+# 
+# # Round 1 - June 2024
+# 
+# ## using gfwr to pull active vessels
+# 
+# ```{r}
+# NPG_vessels_march_june <- read.csv2(file = here::here("data", "GFW_vesselpresence_mar1-june6.csv"), sep = ",",)
+# 
+# 
+# # try pulling vessel ids using gfwr
+# 
+# E_PHL_AOI <- sf::st_read( dsn = here::here("data", "PHL_Nov2024", "DFO_E_PHL_AOI.geojson" ))
+# NPG_AOI <- sf::st_read( dsn = here::here("data", "PHL_Nov2024", "DFO_E_PHL_AOI.geojson" ))
+# NPG_AOI <- sf::st_read( dsn = here::here("data", "geometry_test.geojson" ))
+# 
+# # INPUT IS A PATH TO A FILE
+# 
+# # The user-defined geojson has to be surrounded by a geojson tag, that can be created using a simple paste:
+# 
+# # geojson_tagged <- paste0('{"geojson":', NPG_AOI,'}') # in documentation but nate provided other way
+# 
+# geojson_tagged <- gfwr::sf_to_geojson(NPG_AOI %>% dplyr::select(-bbox)) # nate's recommendation
+# 
+# NPG <- get_raster(spatial_resolution = "LOW",
+#            temporal_resolution = "DAILY",
+#            group_by = "VESSEL_ID",
+#            date_range = "2024-06-01,2024-06-07",
+#            region = geojson_tagged,
+#            region_source = "USER_JSON",
+#            key = gfw_auth())
+# 
+# 
+# 
+# NPG %>% select("Vessel ID", "Flag", "Vessel Name", "Gear Type", "Vessel Type", "MMSI", "IMO")
+# ```
+
+
+
+
+---
+title: "DFO Patrol Support - PHL November"
+author: "Max Schofield"
+date: "2024-10-23"
+output:
+  html_document:
+    df_print: paged
+  df_print: default
+  html_notebook: null
+highlight: pygments
+toc: yes
+toc_float:
+  toc_collapsed: yes
+toc_depth: 2
+editor_options:
+  chunk_output_type: inline
+---
+
+```{=html}
+<style>
+body {
+text-align: left}
+</style>
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load packages, echo=F, warning=F, include=FALSE}
+load_or_install_libraries <- function(x){
+  for( i in x ){
+    #  require returns TRUE invisibly if it was able to load package
+    if( ! require( i , character.only = TRUE ) ){
+      #  If package was not able to be loaded then re-install
+      install.packages( i , dependencies = TRUE )
+      #  Load package after installing
+      require( i , character.only = TRUE )
+    }
+  }
+}
+
+# if (!require("remotes"))
+#   install.packages("remotes")
+# 
+# remotes::install_github("GlobalFishingWatch/gfwr", force=T)
+
+#  Then try/install packages...
+load_or_install_libraries( c("tidyverse" , "bigrquery" ,"devtools", "DBI","glue", "lubridate", "here", "sf", "extrafont", "patchwork", "terra", "rgeos", "ggspatial", "gfwr") )
+
+# get fishwatch r independently 
+if (!require("fishwatchr")) {devtools::install_github("GlobalFishingWatch/fishwatchr")}
+library(fishwatchr)
+```
+
+```{r connection to BQ, echo=F, warning=F, include=FALSE}
+con <- DBI::dbConnect(drv = bigrquery::bigquery(), 
+                      project = "world-fishing-827", 
+                      use_legacy_sql = FALSE)
+```
+
+```{r try use GFW to pull vessel list, echo=FALSE, warning=FALSE, include=FALSE}
+
+# pull in KML shared by DFO from Dustin on 23Oct2024 
+# saved here https://drive.google.com/drive/u/0/folders/1C4_f79pSh63IzCu8GzG0WY5i_1LM7YHH
+
+# e_phl <- sf::st_read( dsn = here::here("data", "PHL_Nov2024", "AOI - East Philippine Sea.kml" ))
+e_phl <- sf::st_read( dsn = here::here("data", "PHL_Nov2024", "AOI-East_Philippine_Sea.geojson" ))
+e_phl <- gfwr::sf_to_geojson(e_phl %>% dplyr::select(-bbox)) # remove bbox
+
+hsp_1 <- sf::st_read( dsn = here::here("data","PHL_Nov2024", "AOI - HSP1.geojson" ))
+hsp_1 <- gfwr::sf_to_geojson(hsp_1 %>% dplyr::select(-bbox)) # remove bbox
+
+# drop Z dimension existing in KML -- note this didnt work for me, used bbox drop above (after downloading new json from the map)
+# e_phl_t <- sf::st_zm(e_phl, drop = TRUE, what = "ZM")
+# hsp_1_t <- sf::st_zm(hsp_1, drop = TRUE, what = "ZM")
+
+# E PHL EEZ
+
+# API query the data 
+voi_e_phl_1 <- get_raster(spatial_resolution = "LOW",
+           temporal_resolution = "DAILY",
+           group_by = "VESSEL_ID",
+           date_range = "2024-09-01,2024-10-31",
+           region = e_phl,
+           region_source = "USER_JSON",
+           key = gfw_auth())
+
+voi_e_phl_2 <- get_raster(spatial_resolution = "LOW",
+           temporal_resolution = "DAILY",
+           group_by = "VESSEL_ID",
+           date_range = "2024-09-01,2024-11-08",
+           region = e_phl,
+           region_source = "USER_JSON",
+           key = gfw_auth())
+
+# take out vessel identity only 
+east_phl_ves <- voi_e_phl_1 %>% group_by(`Vessel ID`, `Flag`, `Vessel Name`, `Gear Type`, `Vessel Type`, `MMSI`, `IMO`, `CallSign`) %>% summarise(fishing_hours = sum(`Apparent Fishing Hours`))
+east_phl_ves_2 <- voi_e_phl_2 %>% group_by(`Vessel ID`, `Flag`, `Vessel Name`, `Gear Type`, `Vessel Type`, `MMSI`, `IMO`, `CallSign`) %>% summarise(fishing_hours = sum(`Apparent Fishing Hours`))
+east_phl_ves_2$area <- 'East Philippines AOI'
+
+# High Seas Pocket 1
+
+# API query the data 
+voi_hsp_1 <- get_raster(spatial_resolution = "LOW",
+           temporal_resolution = "DAILY",
+           group_by = "VESSEL_ID",
+           date_range = "2024-09-01,2024-10-31",
+           region = hsp_1,
+           region_source = "USER_JSON",
+           key = gfw_auth())
+
+voi_hsp_2 <- get_raster(spatial_resolution = "LOW",
+           temporal_resolution = "DAILY",
+           group_by = "VESSEL_ID",
+           date_range = "2024-09-01,2024-11-08",
+           region = hsp_1,
+           region_source = "USER_JSON",
+           key = gfw_auth())
+# take out vessel identity only 
+#hsp_1_ves <- voi_hsp_1 %>% select("Vessel ID", "Flag", "Vessel Name", "Gear Type", "Vessel Type", "MMSI", "IMO") %>% distinct()
+
+hsp_1_ves <- voi_hsp_1 %>% group_by(`Vessel ID`, `Flag`, `Vessel Name`, `Gear Type`, `Vessel Type`, `MMSI`, `IMO`) %>% summarise(fishing_hours = sum(`Apparent Fishing Hours`))
+hsp_1_ves$area <- 'HSP 1 AOI'
+hsp_1_ves_2 <- voi_hsp_2 %>% group_by(`Vessel ID`, `Flag`, `Vessel Name`, `Gear Type`, `Vessel Type`, `MMSI`, `IMO`) %>% summarise(fishing_hours = sum(`Apparent Fishing Hours`))
+hsp_1_ves_2$area <- 'HSP 1 AOI'
+
+# combine datasets 
+dfo_voi_dataset_1 <- bind_rows(east_phl_ves, hsp_1_ves)
+dfo_voi_dataset_2 <- bind_rows(east_phl_ves_2, hsp_1_ves_2)
+
+# find registry info to add to identity info
+ids <- unique(dfo_voi_dataset_2$`Vessel ID`)
+
+# pull registry info using vessel_id 
+registry_info <- gfwr:: get_vessel_info(ids = ids,
+                search_type = "id",
+                key = gfw_auth())$registryInfo
+
+# just columns of interest
+registry_info_of_int <- dplyr::select(registry_info, ssvid, flag, callsign, imo, 
+                                      transmissionDateFrom, transmissionDateTo)
+
+# make date time columns in R format  
+registry_info_of_int$transmissionDateTo <- as.POSIXct(registry_info_of_int$transmissionDateTo, format = "%Y-%m-%dT%H:%M:%OSZ", tz = "UTC")
+registry_info_of_int$transmissionDateFrom <- as.POSIXct(registry_info_of_int$transmissionDateFrom, format = "%Y-%m-%dT%H:%M:%OSZ", tz = "UTC")
+
+# filter info to latest datetime 
+date_string_start <- "2024-09-01"
+date_string_end <- "2024-11-08"
+registry_info_f <- filter(registry_info_of_int, between(transmissionDateTo,
+                                     as.POSIXct(date_string_start, format = "%Y-%m-%d", tz = "UTC"),
+                                     as.POSIXct(date_string_end, format = "%Y-%m-%d", tz = "UTC")))
+
+# join datasets together
+dfo_voi_dataset_2$MMSI <- as.character(dfo_voi_dataset_2$MMSI)
+combined_2 <- left_join(dfo_voi_dataset_2, unique(dplyr::select(registry_info_f, ssvid, imo)), by=c('MMSI'='ssvid'))
+
+# add imo and callsign when missing 
+combined_2$IMO <- ifelse(is.na(combined_2$IMO), combined_2$imo, combined_2$IMO)
+
+```
+
+```{r add in url, echo=F, warning=F, include=FALSE}
+
+# base componenets for VV string to accompany port profiles 
+base_string_p1 <- 'https://globalfishingwatch.org/map/vessel/'
+base_string_p2 <- '?&start='
+base_string_p3 <- '&end='
+start_date_url <- '2024-09-01'
+end_date_url <- '2024-10-31'
+
+#format(voyages_with_coverage$trip_start, format='%Y-%m-%d')
+
+# paste string components together using vessel id, trip start and trip end from data 
+dfo_voi_dataset_url <- bind_cols(combined, 
+                         vv_url = paste('=HYPERLINK("',
+                          base_string_p1,
+                          combined$`Vessel ID`, 
+                          base_string_p2, 
+                          start_date_url, 
+                          base_string_p3, 
+                          end_date_url,
+                          '")', sep=''))
+
+
+write.csv(dplyr::select(dfo_voi_dataset_url, -imo), here::here("data", paste('DFO_vessel_list','_', Sys.Date(),".csv", sep='')), row.names=F)
+```
+
+
+what are new vessels?
+```{r}
+setdiff(dfo_voi_dataset_2$MMSI, dfo_voi_dataset_1$MMSI)
+
+combined_2 %>%
+  readr::write_delim(., here::here('data', 'PHL_Nov2024',
+                                'phl_vessels_sep1_nov8.csv'),
+                     delim = ';')
+
+```
+
