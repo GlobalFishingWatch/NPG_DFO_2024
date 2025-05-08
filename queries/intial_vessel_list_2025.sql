@@ -1,0 +1,659 @@
+--------------------------------------
+  -- Query to identify fishing and carrier vessels in the NPG AOI.
+  -- using geojson of npfc AOI to pull active vessels
+
+  -- this version also fixes gear in encounters vs the old version
+
+## set time frame of interest for voyages (i.e., voyages must start after this date to be included)
+CREATE TEMP FUNCTION  voyage_start_date() AS (TIMESTAMP({start_date}));
+CREATE TEMP FUNCTION  year() AS ({year});
+
+## set active period of interest
+CREATE TEMP FUNCTION  active_period_start() AS (TIMESTAMP({active_start_date}));
+CREATE TEMP FUNCTION  active_period_end() AS (TIMESTAMP({active_end_date}));
+
+## set the current/ending day to calculate voyage duration up to (GFW) real time AND to ensure no voyage starts after it (also need for events bounding)..
+CREATE TEMP FUNCTION  end_day() AS (TIMESTAMP({end_date}));
+
+--------------------------------------
+WITH
+
+----------------------------------------------------------
+-- Define list of VOIs
+----------------------------------------------------------
+
+----------------------------------------------------------
+# Create a geometry object for the polygon. Can use either GeoJSON or WKT input.
+# copied appropriate GeoJSON text from R variable to match Tyler's code (from GFW map)
+----------------------------------------------------------
+npg_aoi as (
+  SELECT ST_GEOGFROMTEXT(string_field_1) AS geom FROM `world-fishing-827.ocean_shapefiles_all_purpose.NPFC_shape`
+),
+
+-- transit AOI to 180 line
+dfo_aoi as (
+  SELECT
+  ST_GEOGFROMTEXT("MultiPolygon (((-179.90452783758004784 34.10511285882622445, -179.86577202662965647 47.9021815571733498, -157.69744816299325407 53.40550671213203771, -144.83051892745606892 57.3585994290741894, -140.56737972291060146 57.04855294147088784, -137.46691484687752904 52.16532076171881016, -128.86312481588578294 46.97204209436343092, -129.87077590059652721 44.56918181543781543, -152.89172760514202309 39.99599612328904641, -171.26198199563791036 36.66299638155350493, -175.99019093158833016 35.81036854064441144, -179.90452783758004784 34.10511285882622445)))") AS transit_aoi_p1,
+  ST_GEOGFROMTEXT("MultiPolygon (((179.97224369522007237 34.8899180305720904, 175.11807837368084506 32.75834842829937799, 174.8080318860775435 28.57272084565475723, 145.04356907616022454 27.9526278704481399, 142.40817393153210446 33.06839491590268665, 143.80338312574698989 34.92867384152251731, 145.3536155637635261 38.49420844896053495, 147.36891773318501464 40.81955710598532505, 146.12873178277177999 42.52481278780350493, 145.50863880756517688 45.78030090763821391, 147.6789642207883162 47.64057983325804457, 154.57749856996181848 46.59417293759685919, 165.39036982512709528 53.5314630977208239, 173.91664823421800179 50.3534865997869403, 179.88504312058162782 49.03578902747289447, 179.97224369522007237 34.8899180305720904)))") AS transit_aoi_p2,
+  ST_GEOGFROMTEXT("MultiPolygon (((145.00481326520954894 43.0189493774212437, 173.08339829878394767 42.9995714719460409, 173.02526458235831797 29.00872371884684853, 145.00481326520954894 29.04747952979726477, 145.00481326520954894 43.0189493774212437)))") AS primary_area_p1,
+  ST_GEOGFROMTEXT("MultiPolygon (((144.63663306118061769 34.91898488878487683, 146.10935387729631429 39.68594963568570932, 165.44850354155252603 52.94043698072704274, 175.44750276675915757 45.26678641254521551, 150.91507443514757369 29.18312486812371276, 144.63663306118061769 34.91898488878487683)))") AS primary_area_p2,
+),
+
+----------------------------------------------------------
+-- all vessels active in AOI during period of interest from messages table
+----------------------------------------------------------
+active_vessel_ids AS (
+  SELECT DISTINCT
+    vessel_id,
+    ANY_VALUE(v.ssvid) AS ssvid,
+    MAX(CAST(ST_CONTAINS(a.transit_aoi_p1, ST_GEOGPOINT(v.lon, v.lat)) AS INT64)) = 1 AS in_transit_aoi_p1,
+    MAX(CAST(ST_CONTAINS(a.transit_aoi_p2, ST_GEOGPOINT(v.lon, v.lat)) AS INT64)) = 1 AS in_transit_aoi_p2,
+    MAX(CAST(ST_CONTAINS(a.primary_area_p1, ST_GEOGPOINT(v.lon, v.lat)) AS INT64)) = 1 AS in_primary_area_p1,
+    MAX(CAST(ST_CONTAINS(a.primary_area_p2, ST_GEOGPOINT(v.lon, v.lat)) AS INT64)) = 1 AS in_primary_area_p2
+  FROM `world-fishing-827.pipe_ais_v3_published.messages` v CROSS JOIN dfo_aoi a
+    WHERE timestamp >= active_period_start() AND timestamp <= active_period_end()
+    AND clean_segs IS TRUE
+  # Filter to polygon using ST_CONTAINS.
+  # You need to create a geometry object for each position using ST_GEOPOINT
+  -- AND ST_CONTAINS((SELECT geom FROM AOI), ST_GEOGPOINT(lon, lat))
+  AND ST_CONTAINS((SELECT geom FROM npg_aoi), ST_GEOGPOINT(lon, lat))
+  GROUP BY
+    vessel_id),
+
+----------------------------------------------------------
+-- pull initial vessel info / format for rest of query
+----------------------------------------------------------
+AOI_vessels AS(
+ SELECT DISTINCT
+   vessel_id,
+   year,
+   IFNULL(IFNULL(gfw_best_flag, core_flag), mmsi_flag) AS vessel_iso3,
+   'present in NPFC' AS vessel_class,
+   prod_geartype AS gear_type,
+  FROM
+    `pipe_ais_v3_published.product_vessel_info_summary`
+  WHERE
+   year = year()
+   AND vessel_id IN (SELECT vessel_id FROM active_vessel_ids)
+  ),
+
+----------------------------------------------------------
+-- voyages for all identified vessels with ongoing voyages in the AOI
+----------------------------------------------------------
+  voyages AS (
+    SELECT
+      *
+    FROM (
+      SELECT
+        *,
+      FROM
+        `pipe_ais_v3_published.voyages_c3`
+      WHERE
+        (trip_start >= voyage_start_date() OR trip_start IS NULL)
+        AND trip_end IS NULL
+        AND trip_start <= end_day()
+        )
+    INNER JOIN AOI_vessels
+    USING
+      (vessel_id)
+      ),
+
+--------------------------------------
+-- Anchorage names
+--------------------------------------
+  anchorage_names AS (
+  SELECT
+    s2id,
+    label,
+    iso3
+  FROM
+    `anchorages.named_anchorages_v20240117`
+    ),
+
+--------------------------------------
+-- Add names to voyages (start and end)
+--------------------------------------
+  named_voyages AS (
+  SELECT
+    * EXCEPT(s2id, label, iso3),
+    c.label AS end_label,
+    c.iso3 AS end_iso3
+  FROM (
+    SELECT
+      * EXCEPT(s2id, label, iso3),
+      b.label AS start_label,
+      b.iso3 AS start_iso3
+    FROM
+      voyages
+    LEFT JOIN
+      anchorage_names b
+    ON
+      trip_start_anchorage_id = s2id)
+  LEFT JOIN
+    anchorage_names c
+  ON
+    trip_end_anchorage_id = s2id),
+
+-------------------------------------------------------------------
+-- The following bit of code is intended to splice together voyages
+-- that pass through the Panama Canal into a single voyage, so as not to inflate assigned
+-- port visits to Panama when the vessel is only using the Canal for transit
+-------------------------------------------------------------------
+
+-- **** consider whether to add same logic for other straits or canals
+
+------------------------------------------------
+-- anchorage ids that represent the Panama Canal
+
+-- JF - note the named_anchorages table was updated without
+-- the Panama Canal sublabels so these are saved in a
+-- separate table for now
+------------------------------------------------
+  panama_canal_ids AS (
+    SELECT s2id AS anchorage_id
+    FROM `world-fishing-827.anchorages.panama_canal_v20231004`
+    WHERE sublabel="PANAMA CANAL" -- not strictly necessary as this table filtered to canal already..
+  ),
+
+-------------------------------------------------------------------
+-- Mark whether start anchorage or end anchorage is in Panama canal
+-------------------------------------------------------------------
+  is_end_port_panama AS (
+    SELECT
+    ssvid,
+    vessel_id,
+    vessel_iso3,
+    -- class_confidence,
+    vessel_class,
+    gear_type,
+    trip_id,
+    trip_start,
+    trip_end,
+    start_iso3,
+    start_label,
+    end_iso3,
+    end_label,
+    trip_start_confidence,
+    trip_end_confidence,
+    trip_start_visit_id,
+    trip_end_visit_id,
+    trip_start_anchorage_id,
+    trip_end_anchorage_id,
+    IF (trip_start_anchorage_id IN (
+      SELECT anchorage_id FROM panama_canal_ids),
+      TRUE, FALSE) current_start_is_panama,
+    IF (trip_end_anchorage_id IN (
+      SELECT anchorage_id FROM panama_canal_ids),
+      TRUE, FALSE) current_end_is_panama,
+    FROM named_voyages
+  ),
+
+------------------------------------------------
+-- Add information about
+-- whether previous and next ports are in Panama
+------------------------------------------------
+  add_prev_next_port AS (
+    SELECT
+    *,
+    IFNULL (
+      LAG (trip_start, 1) OVER (
+        PARTITION BY ssvid
+        ORDER BY trip_start ASC ),
+      TIMESTAMP ("2000-01-01") ) AS prev_trip_start,
+    -- note as structured the prev trip id will be null for each vessels' first voyage in the time period
+    LAG (trip_id, 1) OVER (
+      PARTITION BY ssvid
+      ORDER BY trip_start ASC ) AS prev_trip_id,
+    IFNULL (
+      LEAD (trip_end, 1) OVER (
+        PARTITION BY ssvid
+        ORDER BY trip_start ASC ),
+      TIMESTAMP ("2100-01-01") ) AS next_trip_end,
+    LAG (current_end_is_panama, 1) OVER (
+      PARTITION BY ssvid
+      ORDER BY trip_start ASC ) AS prev_end_is_panama,
+    LEAD (current_end_is_panama, 1) OVER (
+      PARTITION BY ssvid
+      ORDER BY trip_start ASC ) AS next_end_is_panama,
+    LAG (current_start_is_panama, 1) OVER(
+      PARTITION BY ssvid
+      ORDER BY trip_start ASC ) AS prev_start_is_panama,
+    LEAD (current_start_is_panama, 1) OVER(
+      PARTITION BY ssvid
+      ORDER BY trip_start ASC ) AS next_start_is_panama,
+    FROM is_end_port_panama
+  ),
+
+---------------------------------------------------------------------------------
+-- Mark the start and end of the block. The start of the block is the anchorage
+-- just before Panama canal, and the end of the block is the anchorage just after
+-- Panama canal (all consecutive trips within Panama canal will be ignored later).
+-- If there is no Panama canal involved in a trip, the start/end of the block are
+-- the trip start/end of that trip.
+
+-- note there are some trips in which the arrival port is diff than the next departure
+-- (ie one is a canal port and the other not), which makes just classifying based on
+-- current start and end fail - this query requires both current and prev start/end
+---------------------------------------------------------------------------------
+  block_start_end AS (
+    SELECT
+    *,
+          IF (current_start_is_panama AND prev_end_is_panama, NULL, trip_start) AS block_start,
+          IF (current_end_is_panama AND next_start_is_panama, NULL, trip_end) AS block_end
+    FROM add_prev_next_port
+  ),
+
+-------------------------------------------
+-- Find the closest non-Panama ports
+-- by looking ahead and back of the records
+-------------------------------------------
+  look_back_and_ahead AS (
+    SELECT
+    * EXCEPT(block_start, block_end),
+    LAST_VALUE (block_start IGNORE NULLS) OVER (
+      PARTITION BY ssvid
+      ORDER BY trip_start
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS block_start,
+    FIRST_VALUE (block_end IGNORE NULLS) OVER (
+      PARTITION BY ssvid
+      ORDER BY trip_start
+      ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS block_end
+    FROM block_start_end
+  ),
+
+-------------------------------------------------------------------
+-- Within a block, all trips will have the same information
+-- about their block (start / end of the block, anchorage start/end)
+-------------------------------------------------------------------
+  blocks_to_be_collapsed_down AS (
+    SELECT
+    ssvid,
+    block_start,
+    block_end,
+    FIRST_VALUE (vessel_id) OVER (
+      PARTITION BY block_start, block_end, ssvid
+      ORDER BY trip_start ASC) AS vessel_id,
+    FIRST_VALUE (vessel_iso3) OVER (
+      PARTITION BY block_start, block_end, ssvid
+      ORDER BY trip_start ASC) AS vessel_iso3,
+    -- FIRST_VALUE (class_confidence) OVER (
+    --   PARTITION BY block_start, block_end, ssvid
+    --   ORDER BY trip_start ASC) AS class_confidence,
+    FIRST_VALUE (vessel_class) OVER (
+      PARTITION BY block_start, block_end, ssvid
+      ORDER BY trip_start ASC) AS vessel_class,
+    FIRST_VALUE (gear_type) OVER (
+      PARTITION BY block_start, block_end, ssvid
+      ORDER BY trip_start ASC) AS gear_type,
+    FIRST_VALUE (trip_id) OVER (
+      PARTITION BY block_start, block_end, ssvid
+      ORDER BY trip_start ASC) AS trip_id,
+    FIRST_VALUE (start_iso3) OVER (
+      PARTITION BY block_start, block_end, ssvid
+      ORDER BY trip_start ASC) AS start_iso3,
+    FIRST_VALUE (start_label) OVER (
+      PARTITION BY block_start, block_end, ssvid
+      ORDER BY trip_start ASC) AS start_label,
+    FIRST_VALUE (end_iso3) OVER (
+      PARTITION BY block_start, block_end, ssvid
+      ORDER BY trip_end DESC) AS end_iso3,
+    FIRST_VALUE (end_label) OVER (
+      PARTITION BY block_start, block_end, ssvid
+      ORDER BY trip_end DESC) AS end_label,
+    FIRST_VALUE (trip_start_visit_id) OVER (
+      PARTITION BY block_start, block_end, ssvid
+      ORDER BY trip_start ASC) AS trip_start_visit_id,
+    FIRST_VALUE (trip_end_visit_id) OVER (
+      PARTITION BY block_start, block_end, ssvid
+      ORDER BY trip_end DESC) AS trip_end_visit_id,
+    FIRST_VALUE (trip_start_anchorage_id) OVER (
+      PARTITION BY block_start, block_end, ssvid
+      ORDER BY trip_start ASC) AS trip_start_anchorage_id,
+    FIRST_VALUE (trip_end_anchorage_id) OVER (
+      PARTITION BY block_start, block_end, ssvid
+      ORDER BY trip_end DESC) AS trip_end_anchorage_id,
+
+    FIRST_VALUE (trip_start_confidence) OVER (
+      PARTITION BY block_start, block_end, ssvid
+      ORDER BY trip_start ASC) AS trip_start_confidence,
+    FIRST_VALUE (trip_end_confidence) OVER (
+      PARTITION BY block_start, block_end, ssvid
+      ORDER BY trip_end DESC) AS trip_end_confidence,
+    FROM look_back_and_ahead
+  ),
+
+---------------------------------------------------------------------
+-- Blocks get collapsed down to one row, which means a block of trips
+-- becomes a complete trip
+---------------------------------------------------------------------
+  updated_pan_voyages AS (
+    SELECT
+      ssvid,
+      vessel_id,
+      vessel_iso3,
+      -- class_confidence,
+      vessel_class,
+      gear_type,
+      trip_id,
+      block_start AS trip_start,
+      -- block_end AS trip_end,
+      start_iso3,
+      start_label,
+      -- end_iso3,
+      -- end_label,
+      trip_start_visit_id,
+      -- trip_end_visit_id,
+      trip_start_anchorage_id,
+      -- trip_end_anchorage_id,
+      trip_start_confidence,
+      -- trip_end_confidence,
+      CASE -- adding flag if voyages is collapsed bc of PAN crossing
+        WHEN count(*) > 1 THEN 1
+        WHEN count(*) = 1 THEN 0
+        END AS pan_crossing
+    FROM blocks_to_be_collapsed_down
+    GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12
+  ),
+
+--------------------------------------
+-- Identify how many encounters occurred on each voyage
+--------------------------------------
+-- pipe 3
+num_encounters AS (
+  SELECT
+    vessel_id,
+    trip_id,
+    COUNT(*) AS num_encounters
+  FROM (
+    SELECT
+      vessel_id,
+      event_start,
+      event_end,
+      JSON_EXTRACT_SCALAR(event_vessels, "$[0].type") as product_shiptype,
+      -- ## encountered vessel information
+      JSON_EXTRACT_SCALAR(event_vessels, "$[1].type") as enc_product_shiptype,
+      JSON_EXTRACT_SCALAR(event_vessels, "$[1].id") as enc_product_vessel_id,
+      JSON_EXTRACT_SCALAR(event_vessels, "$[1].ssvid") as enc_product_ssvid,
+      start_distance_from_shore_km
+    FROM `pipe_ais_v3_published.product_events_encounter`) enc
+    INNER JOIN (
+      SELECT
+        vessel_id,
+        trip_id,
+        trip_start
+      FROM
+        updated_pan_voyages) voyages
+    USING (vessel_id)
+      WHERE event_start BETWEEN trip_start AND end_day()
+      AND  product_shiptype != 'gear' AND enc_product_shiptype != 'gear'
+    GROUP BY
+       vessel_id, trip_id
+    ),
+
+--------------------------------------
+-- Identify how many loitering events occurred on each voyage
+--------------------------------------
+  -- pipe3
+  num_loitering AS (
+    SELECT
+      vessel_id,
+      trip_id,
+      COUNT(*) AS num_loitering
+    FROM (
+      SELECT
+        vessel_id,
+        event_start
+      FROM
+        `pipe_ais_v3_published.product_events_loitering`
+      WHERE
+        seg_id IN (
+        SELECT
+          seg_id
+        FROM
+          `pipe_ais_v3_published.segs_activity`
+        WHERE
+          good_seg IS TRUE
+          AND overlapping_and_short IS FALSE)
+          AND SAFE_CAST(JSON_QUERY(event_info,"$.avg_distance_from_shore_km") AS FLOAT64) > 37.04 -- to match 20 nm rule used in map
+          AND SAFE_CAST(JSON_QUERY(event_info,"$.loitering_hours") AS FLOAT64) > 2
+          AND SAFE_CAST(JSON_QUERY(event_info,"$.avg_speed_knots") AS FLOAT64) < 2) a
+    INNER JOIN (
+      SELECT
+        vessel_id,
+        trip_id,
+        trip_start,
+        pan_crossing
+      FROM
+        updated_pan_voyages) b
+    USING
+      (vessel_id)
+    WHERE event_start BETWEEN trip_start AND end_day()
+    GROUP BY
+      vessel_id, trip_id
+      ),
+
+--------------------------------------
+-- Identify how many fishing events occurred on each voyage
+--------------------------------------
+-- pipe3
+  num_fishing AS(
+    SELECT
+      vessel_id,
+      trip_id,
+      COUNT(*) AS num_fishing
+    FROM (
+      SELECT
+        vessel_id,
+        event_start
+      FROM
+        `pipe_ais_v3_published.product_events_fishing`) a
+    INNER JOIN (
+      SELECT
+        vessel_id,
+        trip_id,
+        trip_start
+      FROM
+        updated_pan_voyages)
+    USING
+      (vessel_id)
+    WHERE event_start BETWEEN trip_start AND end_day()
+    GROUP BY
+      vessel_id, trip_id
+      ),
+
+  --------------------------------------
+  -- label voyage if it had at least
+  -- one encounter event
+  --------------------------------------
+  add_encounters AS (
+    SELECT
+      a.*,
+      b.num_encounters,
+    IF
+      (b.num_encounters > 0, TRUE, FALSE) AS had_encounter
+    FROM
+      updated_pan_voyages AS a
+    LEFT JOIN
+      num_encounters b
+    USING
+      (vessel_id,
+        trip_id)
+    GROUP BY
+      1,2,3,4,5,6,7,8,9,10,11,12,13,14,15),
+
+--------------------------------------
+-- label voyage if it had at least
+-- one loitering event
+--------------------------------------
+  add_loitering AS (
+    SELECT
+      c.*,
+      d.num_loitering,
+    IF
+      (d.num_loitering > 0, TRUE, FALSE) AS had_loitering
+    FROM
+      add_encounters c
+    LEFT JOIN
+      num_loitering d
+    USING
+      (vessel_id,
+        trip_id)
+    GROUP BY
+      1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17),
+
+--------------------------------------
+-- label voyage if it had at least
+-- one fishing event
+--------------------------------------
+  add_fishing AS (
+    SELECT
+      e.*,
+      f.num_fishing,
+    IF
+      (f.num_fishing > 0, TRUE, FALSE) AS had_fishing
+    FROM
+      add_loitering AS e
+    LEFT JOIN
+      num_fishing f
+    USING
+      (vessel_id,
+        trip_id)
+    GROUP BY
+      1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19),
+
+--------------------------------------
+-- Identify vessel ids with less than
+-- one position per two days and
+-- no identity information.
+--
+-- Justification: there are some
+-- vessels that have vessel_ids with
+-- no identity information, but which
+-- represent a quality track.
+--------------------------------------
+  poor_vessel_ids AS (
+    SELECT
+      *,
+    IF
+      (SAFE_DIVIDE(pos_count,TIMESTAMP_DIFF(last_timestamp, first_timestamp, DAY)) < 0.5
+        AND (shipname.value IS NULL
+          AND callsign.value IS NULL
+          AND imo.value IS NULL), TRUE, FALSE) AS poor_id
+    FROM
+      `pipe_ais_v3_published.vessel_info` ),
+
+--------------------------------------
+-- add trip duration and label 'poor id' vessels
+--------------------------------------
+  vessel_voyages AS (
+    SELECT
+      *,
+      ROUND(TIMESTAMP_DIFF(end_day(), trip_start, HOUR)/24, 2) AS trip_duration_days,
+      CASE WHEN vessel_id IN(SELECT vessel_id FROM poor_vessel_ids WHERE poor_id IS TRUE) THEN TRUE ELSE FALSE END AS poor_id
+    FROM
+      add_fishing
+        ),
+
+--------------------------------------
+-- all qualifying voyages
+--------------------------------------
+  all_voyages AS (
+    SELECT
+      year() AS year,
+      ssvid,
+      vessel_id,
+      vessel_iso3,
+      vessel_class,
+      gear_type,
+      trip_id,
+      trip_start,
+      start_iso3 AS start_port_iso3,
+      start_label AS start_port_label,
+      trip_start_confidence,
+      trip_duration_days,
+      poor_id,
+      num_encounters,
+      num_loitering,
+      num_fishing
+    FROM
+      vessel_voyages
+        ),
+
+--------------------------------------
+-- add vessel info from all_vessels table
+
+-- note, depending on specific query, there may be
+-- additional vessels dropped here that are not
+-- present in all_vessels_byyear (compare to previous subquery)
+--------------------------------------
+  add_vessel_info AS (
+    SELECT * FROM(
+    SELECT
+      vessel_id,
+      year,
+      vessel_class AS origin_list,
+      trip_id,
+      trip_start,
+      start_port_iso3,
+      start_port_label,
+      trip_start_confidence,
+      trip_duration_days,
+      poor_id,
+      num_encounters,
+      num_loitering,
+      num_fishing
+    FROM all_voyages )
+    JOIN (
+      SELECT
+        vessel_id,
+        ssvid,
+        year,
+        shipname,
+        callsign,
+        imo,
+        gfw_best_flag AS vessel_flag_best,
+        prod_shiptype AS vessel_class_best,
+        prod_geartype AS geartype_best
+      FROM
+        `pipe_ais_v3_published.product_vessel_info_summary`)
+      USING
+        (vessel_id, year)),
+
+--------------------------------------
+-- organize table, there are instances of multiple ssvids per vessel_id, but trips are different (not duplicated).
+-- possible that spoofing or that the return visit wasn't recorded
+--------------------------------------
+  clean_info AS(
+    SELECT
+      -- CASE WHEN ssvid IN ("412549267","352182000","412420954","412420956","412421009","412421008","412421012","412421011","412209139","412209142","412421035","412421036","412421076","412209136","412421075","413205170","413205180","412420952","412421024","412549556","412200083","416037500","273354460","273335230","416240500","416248800","416046500","576990000","577079000","416002174","416002998","416000369","416002147","416000275","416002149","416002231","416002222","416002201","416000206","416001054","416000833","416217800","416227600","416002445","416000993","416000855","416004329","416000141","416000411","416225800","416002096","416001233","416002826","416002643","416002724","416002194","416000013","416000139","416001799","412331087","412329655","412329656","412329657","412329658","412331054","412331055","412331088","576770000","431601150","431001079","431501883","431200070","412450001","412549375","412677240","412677270","412440029","412440031","412440032","412440548","412440549","412440691","412440692","412440693","412440694","412440695","412549363","412549364","412549365","412549366","412549367","412549368","412549369","412549371","412549372","412549373","412549374","412549386","412549387","412549388","412549389","412549391","412549392","412549393","412549394","412440697","412440698","412440792","412440793","412440794","412440795","412677070","412440004","412440834","412440723","412440493","457178000","412671880","412401260","412420829","412420829","412420209","412420211","412672220","412672210","412672170","412672160","412672130","412672120","412672040","412672030","412672020","412671990","412671980","412420908","412420912","412671930","412671920","412671910","412671890","412401250","412671870","412420872","412420873","412420978","412420982","412421044","412421043","412421042","412421039","412421139","412421146","412421038","412421037","412549082","412549083","412549084","412549085","412549086","412690730","412690720")
+      -- OR
+      -- imo IN ("9974735","9677595","8786777","8786789","8786480","8786492","8786507","8786519","8540238","8540252","8786806","8786820","8788062","8567303","8540525","8788074","8537360","8549636","8786791","8786521","8607244","8724339","8813582","8655291","8703529","8747977","8676635","9766724","8655605","9694220","9688740","8540991","8539930","8550386","8539849","8540111","8540472","8539887","8534423","8551249","8530972","8792714","8793524","8554370","8530984","8534473","8554356","8554394","8794059","8550879","8550946","8542690","8549832","8342179","8792752","8342155","8542781","8543101","8550702","8550934","8550867","8685478","9717448","9717450","9717462","9717474","9752929","9752931","9769556","8996114","8344567","8344206","8344218","8343721","X3754182","9934589","7815246","8403698","8820509","9031947","9016571","9828704","9828716","9872561","9872573","9888273","9888285","9888297","9934503","9933717","9933729","9933731","9934515","9934527","9934539","9934541","9934553","9934565","9934577","9940497","9940538","9940540","9940552","9940576","9940590","9940617","9940629","9870111","9870587","9870599","9916692","9916654","9916707","9916721","9096507","8414295","9920954","9897066","8790596","8994013","9204087","8783373","8783385","8783426","9160097","8708294","8911047","8783127","8783139","8783141","8783153","8783165","8783177","8783189","8783191","8783232","8783244","8783256","8783268","8783270","8783282","8783294","8783309","8783311","8775170","8775182","8783323","8783335","8783347","8783359","8783361","8783397","8775156","8775168","8783402","8783414","9819569","9819571","9819583","9819595","9861110","9861122","9819600","9819612","9888247","9888417","9888259","9888261","9888431","8774877","8774865")
+      -- THEN TRUE ELSE FALSE END AS DFO_VOI,
+      ssvid,
+      imo,
+      poor_id,
+      vessel_id,
+      shipname,
+      callsign,
+      vessel_flag_best,
+      vessel_class_best,
+      geartype_best,
+      trip_id,
+      trip_start,
+      start_port_iso3,
+      start_port_label,
+      trip_start_confidence,
+      trip_duration_days,
+      CASE WHEN num_encounters IS NULL THEN 0 ELSE num_encounters END AS num_encounters,
+      CASE WHEN num_loitering IS NULL THEN 0 ELSE num_loitering END AS num_loitering,
+      CASE WHEN num_fishing IS NULL THEN 0 ELSE num_fishing END AS num_fishing
+    FROM add_vessel_info)
+
+  SELECT
+  ci.*,
+  vi.*
+  FROM
+  clean_info ci
+  LEFT JOIN (SELECT * EXCEPT(ssvid) FROM active_vessel_ids) vi USING (vessel_id)
+  WHERE vessel_class_best IN ("fishing", "carrier")
+  ORDER BY ssvid
