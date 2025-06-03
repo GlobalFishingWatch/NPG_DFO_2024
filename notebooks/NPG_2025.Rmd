@@ -46,7 +46,7 @@ con <- DBI::dbConnect(drv = bigrquery::bigquery(),
 # parameters for vessel list 
 # date range to run analysis off. Need hard end date for open voyages
 start_date <- "'2025-03-15 00:00:00 UTC'" 
-end_date <- "'2025-05-06 23:59:59 UTC'"
+end_date <- "'2025-06-02 23:59:59 UTC'"
 
 # activity range to look in  
 active_start_date <- "'2025-03-15 00:00:00 UTC'" 
@@ -58,22 +58,22 @@ year <- 2025
 ```
 
 ```{r pull in vessel list based on time range, echo=F, warning=F, include=FALSE}
-npg_vessels_q <- readr::read_file(here::here("queries", "active_relevant_vessels.sql"))
-
-npg <- fishwatchr::gfw_query(query = glue::glue(npg_vessels_q, 
-                                          start_date = start_date,
-                                          end_date = end_date,
-                                          year = year,
-                                          active_start_date = active_start_date, 
-                                          active_end_date = active_end_date),
-                                 run_query = TRUE,
-                                 con = con)$data
-
-table(npg$prod_geartype)
+# npg_vessels_q <- readr::read_file(here::here("queries", "active_relevant_vessels.sql"))
+# 
+# npg <- fishwatchr::gfw_query(query = glue::glue(npg_vessels_q, 
+#                                           start_date = start_date,
+#                                           end_date = end_date,
+#                                           year = year,
+#                                           active_start_date = active_start_date, 
+#                                           active_end_date = active_end_date),
+#                                  run_query = TRUE,
+#                                  con = con)$data
+# 
+# table(npg$prod_geartype)
 
 ```
 
-```{r pull in vessel list based on time range, echo=F, warning=F, include=FALSE}
+```{r pull in voyage list based on time range, echo=F, warning=F, include=FALSE}
 npg_voyage_q <- readr::read_file(here::here("queries", "intial_vessel_list_2025.sql"))
 
 npg_voyages_info <- fishwatchr::gfw_query(query = glue::glue(npg_voyage_q, 
@@ -90,19 +90,21 @@ str(npg_voyages_info)
 
 
 ```{r add in DFO vessel list, echo=F, warning=F, include=FALSE}
-# list of vessel from DFO on VMS in NPG AOI 
-npfc_vms <- read.csv(here::here("data","NPG_2025", "list of vessels in north pacific - VMS.csv"), header=T)
+# don't run this step in the secoond iteration as we don't have updated results from IMCSN
 
-# set mmsi to character
-npfc_vms$ssvid <- as.character(npfc_vms$mmsi)
-
-# join DFO MMSIs
-npg_voyages <- npg_voyages_info %>% 
-        full_join(dplyr::select(npfc_vms, ssvid, dfo_name = name))
-
-#
-missing_vessels <- filter(npg_voyages, is.na(vessel_id))
-write.csv(missing_vessels, here::here("data","NPG_2025", paste("DFO_missing_vessels",'-', Sys.Date(),".csv", sep='')), row.names=F)
+# # list of vessel from DFO on VMS in NPG AOI 
+# npfc_vms <- read.csv(here::here("data","NPG_2025", "list of vessels in north pacific - VMS.csv"), header=T)
+# 
+# # set mmsi to character
+# npfc_vms$ssvid <- as.character(npfc_vms$mmsi)
+# 
+# # join DFO MMSIs
+# npg_voyages <- npg_voyages_info %>% 
+#         full_join(dplyr::select(npfc_vms, ssvid, dfo_name = name))
+# 
+# #
+# missing_vessels <- filter(npg_voyages, is.na(vessel_id))
+# write.csv(missing_vessels, here::here("data","NPG_2025", paste("DFO_missing_vessels",'-', Sys.Date(),".csv", sep='')), row.names=F)
 
 ```
 
@@ -113,34 +115,55 @@ base_string_p1 <- 'https://globalfishingwatch.org/map/vessel/'
 base_string_p2 <- '?&start='
 base_string_p3 <- '&end='
 start_date_url <- '2024-09-01'
-end_date_url <- '2025-05-08'
+end_date_url <- '2025-06-02'
 
 #format(voyages_with_coverage$trip_start, format='%Y-%m-%d')
 
 # paste string components together using vessel id, trip start and trip end from data 
-dfo_voi_dataset_url <- bind_cols(npg_voyages, 
+dfo_voi_dataset_url <- bind_cols(npg_voyages_info, 
                          vv_url = paste('=HYPERLINK("',
                           base_string_p1,
-                          npg_voyages$vessel_id, 
+                          npg_voyages_info$vessel_id, 
                           base_string_p2, 
-                          as.Date(format(npg_voyages$trip_start, format='%Y-%m-%d'))-2, 
+                          as.Date(format(npg_voyages_info$trip_start, format='%Y-%m-%d'))-2, 
                           base_string_p3, 
                           end_date_url,
                           '")', sep=''))
 
 
-write.csv(dfo_voi_dataset_url, here::here("data","NPG_2025", paste('NPG_vessel_list','-', Sys.Date(),".csv", sep='')), row.names=F)
+#write.csv(dfo_voi_dataset_url, here::here("data","NPG_2025", paste('NPG_vessel_list','-', Sys.Date(),".csv", sep='')), row.names=F)
 ```
 
 
 what are new vessels?
-```{r}
-setdiff(dfo_voi_dataset_2$MMSI, dfo_voi_dataset_1$MMSI)
+```{r look at previous vessel list and current list - identify differences}
+may_list <- read.csv(here::here("data","NPG_2025","NPG_vessel_list-2025-05-08.csv"), header=T)
 
-combined_2 %>%
-  readr::write_delim(., here::here('data', 'PHL_Nov2024',
-                                'phl_vessels_sep1_nov8.csv'),
-                     delim = ';')
+# compare dataset length 
+nrow(may_list)
+nrow(dfo_voi_dataset_url)
+
+# new vessels with setdiff
+setdiff(dfo_voi_dataset_url$ssvid, may_list$ssvid)
+
+# Only include vessels that are in the primary or secondary area of interest for the patrol
+dfo_aoi <- filter(dfo_voi_dataset_url, in_primary_area_p1 | in_primary_area_p2)
+
+# create a new vessel column for debugging  
+dfo_aoi$new_ves <- ifelse(dfo_aoi$ssvid %in% setdiff(dfo_aoi$ssvid, may_list$ssvid), TRUE, FALSE)
+
+
+
+
+write.csv(dfo_aoi, here::here("data","NPG_2025", paste('NPG_vessel_list','-', Sys.Date(),".csv", sep='')), row.names=F)
+
+# 
+# setdiff(dfo_voi_dataset_2$MMSI, dfo_voi_dataset_1$MMSI)
+# 
+# combined_2 %>%
+#   readr::write_delim(., here::here('data', 'PHL_Nov2024',
+#                                 'phl_vessels_sep1_nov8.csv'),
+#                      delim = ';')
 
 ```
 
