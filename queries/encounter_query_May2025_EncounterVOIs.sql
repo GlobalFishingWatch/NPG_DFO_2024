@@ -71,7 +71,7 @@ encounters AS (
       ARRAY_TO_STRING(regions_mean_position.rfmo, ", ") AS rfmo,
       -- regions_mean_position.rfmo AS rfmo,
       start_distance_from_shore_km,
-      FROM `pipe_ais_v3_published.product_events_encounter`
+      FROM `global-fishing-watch.pipe_ais_v4_published.product_events_encounters`
       ) enc
     INNER JOIN voyages
       ON
@@ -110,7 +110,7 @@ encounter_v_info AS(
         prod_shiptype AS vessel_class_best,
         prod_geartype AS geartype
       FROM
-        `pipe_ais_v3_published.product_vessel_info_summary`) vi
+        `global-fishing-watch.pipe_ais_identity_v4_published.product_vessel_info_summary`) vi
       ON
         events.encountered_vessel_id = vi.vessel_id AND events.year = vi.year),
 

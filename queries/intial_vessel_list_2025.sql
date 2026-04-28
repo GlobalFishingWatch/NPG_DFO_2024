@@ -71,7 +71,7 @@ AOI_vessels AS(
    'present in NPFC' AS vessel_class,
    prod_geartype AS gear_type,
   FROM
-    `pipe_ais_v3_published.product_vessel_info_summary`
+    `global-fishing-watch.pipe_ais_identity_v4_published.product_vessel_info_summary`
   WHERE
    year = year()
    AND vessel_id IN (SELECT vessel_id FROM active_vessel_ids)
@@ -87,7 +87,7 @@ AOI_vessels AS(
       SELECT
         *,
       FROM
-        `pipe_ais_v3_published.voyages_c3`
+        `global-fishing-watch.pipe_ais_v4_published.voyages_c3`
       WHERE
         (trip_start >= voyage_start_date() OR trip_start IS NULL)
         AND trip_end IS NULL
@@ -375,7 +375,7 @@ num_encounters AS (
       JSON_EXTRACT_SCALAR(event_vessels, "$[1].id") as enc_product_vessel_id,
       JSON_EXTRACT_SCALAR(event_vessels, "$[1].ssvid") as enc_product_ssvid,
       start_distance_from_shore_km
-    FROM `pipe_ais_v3_published.product_events_encounter`) enc
+    FROM `global-fishing-watch.pipe_ais_v4_published.product_events_encounters`) enc
     INNER JOIN (
       SELECT
         vessel_id,
@@ -393,7 +393,6 @@ num_encounters AS (
 --------------------------------------
 -- Identify how many loitering events occurred on each voyage
 --------------------------------------
-  -- pipe3
   num_loitering AS (
     SELECT
       vessel_id,
@@ -410,7 +409,7 @@ num_encounters AS (
         SELECT
           seg_id
         FROM
-          `pipe_ais_v3_published.segs_activity`
+          `global-fishing-watch.pipe_ais_v4_published.product_events_loitering`
         WHERE
           good_seg IS TRUE
           AND overlapping_and_short IS FALSE)
@@ -435,7 +434,6 @@ num_encounters AS (
 --------------------------------------
 -- Identify how many fishing events occurred on each voyage
 --------------------------------------
--- pipe3
   num_fishing AS(
     SELECT
       vessel_id,
@@ -446,7 +444,7 @@ num_encounters AS (
         vessel_id,
         event_start
       FROM
-        `pipe_ais_v3_published.product_events_fishing`) a
+        `global-fishing-watch.pipe_ais_v4_published.product_events_fishing`) a
     INNER JOIN (
       SELECT
         vessel_id,
@@ -540,7 +538,7 @@ num_encounters AS (
           AND callsign.value IS NULL
           AND imo.value IS NULL), TRUE, FALSE) AS poor_id
     FROM
-      `pipe_ais_v3_published.vessel_info` ),
+      `global-fishing-watch.pipe_ais_v4_published.vessel_info` ),
 
 --------------------------------------
 -- add trip duration and label 'poor id' vessels
@@ -615,7 +613,7 @@ num_encounters AS (
         prod_shiptype AS vessel_class_best,
         prod_geartype AS geartype_best
       FROM
-        `pipe_ais_v3_published.product_vessel_info_summary`)
+        `global-fishing-watch.pipe_ais_identity_v4_published.product_vessel_info_summary`)
       USING
         (vessel_id, year)),
 

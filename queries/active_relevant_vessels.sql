@@ -73,7 +73,7 @@ active_vessel_ids AS (
       prod_geartype,
       best_vessel_class,
       registry_vessel_class,
-    FROM `pipe_ais_v3_published.product_vessel_info_summary`
+    FROM `global-fishing-watch.pipe_ais_identity_v4_published.product_vessel_info_summary`
     WHERE
       potential_fishing
       OR core_is_bunker
