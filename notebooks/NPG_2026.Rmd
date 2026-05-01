@@ -1,0 +1,193 @@
+---
+title: "NPG_2026"
+author: "Max Schofield"
+date: "2026-04-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r load packages, echo=F, warning=F, include=FALSE}
+load_or_install_libraries <- function(x){
+  for( i in x ){
+    #  require returns TRUE invisibly if it was able to load package
+    if( ! require( i , character.only = TRUE ) ){
+      #  If package was not able to be loaded then re-install
+      install.packages( i , dependencies = TRUE )
+      #  Load package after installing
+      require( i , character.only = TRUE )
+    }
+  }
+}
+
+# if (!require("remotes"))
+#   install.packages("remotes")
+# 
+# remotes::install_github("GlobalFishingWatch/gfwr", force=T)
+
+#  Then try/install packages...
+load_or_install_libraries( c("tidyverse" , "bigrquery" ,"devtools", "DBI","glue", "lubridate", "here", "sf", "extrafont", "patchwork", "terra", "rgeos", "ggspatial", "gfwr") )
+
+# get fishwatch r independently 
+if (!require("fishwatchr")) {devtools::install_github("GlobalFishingWatch/fishwatchr")}
+library(fishwatchr)
+```
+
+```{r connection to BQ, echo=F, warning=F, include=FALSE}
+con <- DBI::dbConnect(drv = bigrquery::bigquery(), 
+                      project = "world-fishing-827", 
+                      use_legacy_sql = FALSE)
+```
+
+
+```{r add in url, echo=F, warning=F, include=FALSE}
+# parameters for vessel list 
+# date range to run analysis off. Need hard end date for open voyages
+start_date <- "'2026-03-01 00:00:00 UTC'" 
+end_date <- "'2026-04-30 23:59:59 UTC'"
+
+# activity range to look in  
+active_start_date <- "'2026-03-01 00:00:00 UTC'" 
+active_end_date <- "'2026-06-30 23:59:59 UTC'"
+
+# year 
+year <- 2026
+
+```
+
+```{r pull in vessel list based on time range, echo=F, warning=F, include=FALSE}
+# npg_vessels_q <- readr::read_file(here::here("queries", "active_relevant_vessels.sql"))
+# 
+# npg <- fishwatchr::gfw_query(query = glue::glue(npg_vessels_q, 
+#                                           start_date = start_date,
+#                                           end_date = end_date,
+#                                           year = year,
+#                                           active_start_date = active_start_date, 
+#                                           active_end_date = active_end_date),
+#                                  run_query = TRUE,
+#                                  con = con)$data
+# 
+# table(npg$prod_geartype)
+
+```
+
+```{r pull in voyage list based on time range, echo=F, warning=F, include=FALSE}
+npg_voyage_q <- readr::read_file(here::here("queries", "intial_vessel_list_2026.sql"))
+
+npg_voyages_info <- fishwatchr::gfw_query(query = glue::glue(npg_voyage_q, 
+                                          start_date = start_date,
+                                          end_date = end_date,
+                                          year = year,
+                                          active_start_date = active_start_date, 
+                                          active_end_date = active_end_date),
+                                 run_query = TRUE,
+                                 con = con)$data
+
+str(npg_voyages_info)
+```
+
+
+```{r add in url, echo=F, warning=F, include=FALSE}
+# base componenets for VV string to accompany port profiles 
+base_string_p1 <- 'https://globalfishingwatch.org/map/vessel/'
+base_string_p2 <- '?&start='
+base_string_p3 <- '&end='
+start_date_url <- '2026-03-01'
+end_date_url <- '2026-04-30'
+
+#format(voyages_with_coverage$trip_start, format='%Y-%m-%d')
+
+# paste string components together using vessel id, trip start and trip end from data 
+dfo_voi_dataset_url <- bind_cols(npg_voyages_info, 
+                         vv_url = paste('=HYPERLINK("',
+                          base_string_p1,
+                          npg_voyages_info$vessel_id, 
+                          base_string_p2, 
+                          # as.Date(format(npg_voyages_info$trip_start, format='%Y-%m-%d'))-2, 
+                          start_date_url,
+                          base_string_p3, 
+                          end_date_url,
+                          '")', sep=''))
+
+
+write.csv(dfo_voi_dataset_url, here::here("data","NPG_2026", paste('NPG_vessel_list','-', Sys.Date(),".csv", sep='')), row.names=F)
+```
+
+```{r query TMT compliance data, echo=F, warning=F, include=FALSE}
+
+TMT_compliance <- fishwatchr::gfw_query(query = 
+    "SELECT DISTINCT
+      mmsi,
+      list_uvi, 
+      JSON_VALUE(extra_fields, '$.compliance_info') AS compliance_info 
+    FROM `gfw-int-vessel-identity-src-v1.pipe_registry_sources_v1_internal.registry_tmt_v*`
+    WHERE mmsi IS NOT NULL",
+                                 run_query = TRUE,
+                                 con = con)$data
+
+str(TMT_compliance)
+```
+
+
+```{r add in 2025 vessel list + Skylight match, echo=F, warning=F, include=FALSE}
+# list of vessels sent to DFO in 2025
+npfc_2025_phase_1 <- read.csv(here::here("data","NPG_2025", "NPG May 2025 - Phase I.csv"), header=T)
+npfc_2025_phase_2 <- read.csv(here::here("data","NPG_2025", "NPG May 2025 - Phase II.csv"), header=T)
+
+# remove duplicated from vessels in the phase 1 aoi
+npfc_2025_phase_2_new <- filter(npfc_2025_phase_2, New_vessel)
+
+# add an origin column in logic for matching   
+npfc_2025_phase_1$phase1_2025 <- TRUE
+npfc_2025_phase_1$phase2_2025 <- FALSE
+npfc_2025_phase_2_new$phase1_2025 <- FALSE
+npfc_2025_phase_2_new$phase2_2025 <- TRUE
+
+# align the data sets 
+npfc_2025_comb <- rbind(
+  npfc_2025_phase_1[,colnames(npfc_2025_phase_1) %in% colnames(npfc_2025_phase_2_new)], 
+  npfc_2025_phase_2_new[,colnames(npfc_2025_phase_2_new) %in% colnames(npfc_2025_phase_1)]) 
+
+# Skylight vessels with events 
+npfc_2026_Skylight <- read.csv(here::here("data","NPG_2026", "NPG_vessels_Skylight_29Apr2026.csv"), header=T)
+npfc_2026_Skylight$MMSI <- as.character(npfc_2026_Skylight$MMSI)
+
+# rename Skylight vessel names 
+npfc_2026_Skylight <- npfc_2026_Skylight %>% rename_with(~ paste0("skylight_", .))
+
+## start doing data joins 
+# add TMT_compliance
+TMT_compliance$mmsi <- as.character(TMT_compliance$mmsi)
+dfo_voi_dataset_url_tmt <- left_join(dfo_voi_dataset_url, distinct(dplyr::select(TMT_compliance, mmsi, compliance_info)), by=c('ssvid'='mmsi')) 
+
+# add Skylight data from shippy 
+add_skylight <- full_join(dfo_voi_dataset_url, npfc_2026_Skylight, by=c('ssvid'='skylight_MMSI'))
+
+# add last year data columns 
+# just take IHS data and compliance data 
+phase1_25_ihs_compliance <- dplyr::select(npfc_2025_comb, 2,6:25, 68:69)
+phase1_25_ihs_compliance$MMSI <- as.character(phase1_25_ihs_compliance$MMSI)
+full_df <- left_join(add_skylight, phase1_25_ihs_compliance, by=c('ssvid'='MMSI'))
+
+## dataset tidy-up for the final product
+# reset NA to FALSE for 2025 logic columns
+full_df$phase1_2025[is.na(full_df$phase1_2025)] <- FALSE
+full_df$phase2_2025[is.na(full_df$phase2_2025)] <- FALSE
+
+# remove some irrelevant columns
+full_df_mod <- dplyr::select(full_df, -poor_id, -vessel_id, -vessel_id_1, -geartype_best.y, -trip_id)
+
+# rename some columns 
+colnames(full_df_mod)[c(1,7)] <- c('MMSI','geartype_best')
+
+# write out dataset 
+write.csv(full_df_mod, here::here("data","NPG_2026", paste("DFO_vessel_list_v2",'-', Sys.Date(),".csv", sep='')), row.names=F)
+
+```
+
+
+
+
