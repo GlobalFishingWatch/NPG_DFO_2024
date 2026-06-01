@@ -91,14 +91,12 @@ str(npg_voyages_info)
 
 
 ```{r add in url, echo=F, warning=F, include=FALSE}
-# base componenets for VV string to accompany port profiles 
+# base componenets for VV string  
 base_string_p1 <- 'https://globalfishingwatch.org/map/vessel/'
 base_string_p2 <- '?&start='
 base_string_p3 <- '&end='
 start_date_url <- '2026-03-01'
 end_date_url <- '2026-04-30'
-
-#format(voyages_with_coverage$trip_start, format='%Y-%m-%d')
 
 # paste string components together using vessel id, trip start and trip end from data 
 dfo_voi_dataset_url <- bind_cols(npg_voyages_info, 
@@ -106,7 +104,6 @@ dfo_voi_dataset_url <- bind_cols(npg_voyages_info,
                           base_string_p1,
                           npg_voyages_info$vessel_id, 
                           base_string_p2, 
-                          # as.Date(format(npg_voyages_info$trip_start, format='%Y-%m-%d'))-2, 
                           start_date_url,
                           base_string_p3, 
                           end_date_url,
@@ -188,6 +185,95 @@ write.csv(full_df_mod, here::here("data","NPG_2026", paste("DFO_vessel_list_v2",
 
 ```
 
+## rerun 1st June
+
+```{r rerun 1st June 2026, echo=F, warning=F, include=FALSE}
+# parameters for vessel list 
+# date range to run analysis off. Need hard end date for open voyages
+
+start_date <- "'2026-04-30 23:59:59 UTC'"
+end_date <- "'2026-06-01 00:00:00 UTC'" 
+
+# activity range to look in  
+active_start_date <- "'2026-04-30 23:59:59 UTC'" 
+active_end_date <- "'2026-06-01 00:00:00 UTC'"
+
+# year 
+year <- 2026
+
+```
+
+```{r pull in voyage list for new time range , echo=F, warning=F, include=FALSE}
+npg_voyage_q <- readr::read_file(here::here("queries", "intial_vessel_list_2026.sql"))
+
+npg_voyages_info_v2 <- fishwatchr::gfw_query(query = glue::glue(npg_voyage_q, 
+                                          start_date = start_date,
+                                          end_date = end_date,
+                                          year = year,
+                                          active_start_date = active_start_date, 
+                                          active_end_date = active_end_date),
+                                 run_query = TRUE,
+                                 con = con)$data
 
 
+npg_voyages_info_v2$ssvid[!npg_voyages_info_v2$ssvid %in% full_df_mod$MMSI]
 
+```
+
+```{r add in url v2, echo=F, warning=F, include=FALSE}
+# base componenets for VV string  
+base_string_p1 <- 'https://globalfishingwatch.org/map/vessel/'
+base_string_p2 <- '?&start='
+base_string_p3 <- '&end='
+start_date_url <- '2026-04-30'
+end_date_url <- '2026-06-02'
+
+# paste string components together using vessel id, trip start and trip end from data 
+dfo_voi_dataset_url_v2 <- bind_cols(npg_voyages_info_v2, 
+                         vv_url = paste('=HYPERLINK("',
+                          base_string_p1,
+                          npg_voyages_info_v2$vessel_id, 
+                          base_string_p2, 
+                          start_date_url,
+                          base_string_p3, 
+                          end_date_url,
+                          '")', sep=''))
+
+
+```
+
+
+```{r add in 2025 vessel list + Skylight match, echo=F, warning=F, include=FALSE}
+
+nrow(dfo_voi_dataset_url_v2)
+nrow(full_df_mod)
+colnames(full_df_mod)
+
+# add Skylight data from v1
+add_skylight_v2 <- left_join(dfo_voi_dataset_url_v2, npfc_2026_Skylight, by=c('ssvid'='skylight_MMSI'))
+
+# add last year data columns 
+# just take IHS data and compliance data 
+phase1_25_ihs_compliance <- dplyr::select(npfc_2025_comb, 2,6:25, 68:69)
+phase1_25_ihs_compliance$MMSI <- as.character(phase1_25_ihs_compliance$MMSI)
+full_df_p2 <- left_join(add_skylight_v2, phase1_25_ihs_compliance, by=c('ssvid'='MMSI'))
+
+## dataset tidy-up for the final product
+# reset NA to FALSE for 2025 logic columns
+full_df_p2$phase1_2025[is.na(full_df_p2$phase1_2025)] <- FALSE
+full_df_p2$phase2_2025[is.na(full_df_p2$phase2_2025)] <- FALSE
+
+# add in if in Phase 1 area in phase 1 2026 
+full_df_p2$inital_list_2026 <- full_df_p2$ssvid %in% full_df_mod$MMSI
+
+
+# remove some irrelevant columns
+full_df_mod_p2 <- dplyr::select(full_df_p2, -poor_id, -vessel_id, -vessel_id_1, -geartype_best.y, -trip_id)
+
+# rename some columns 
+colnames(full_df_mod_p2)[c(1,7)] <- c('MMSI','geartype_best')
+
+# write out dataset 
+write.csv(full_df_mod_p2, here::here("data","NPG_2026", paste("DFO_vessel_list_phase2",'-', Sys.Date(),".csv", sep='')), row.names=F)
+
+```
