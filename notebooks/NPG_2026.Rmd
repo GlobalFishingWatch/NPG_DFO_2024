@@ -191,7 +191,7 @@ write.csv(full_df_mod, here::here("data","NPG_2026", paste("DFO_vessel_list_v2",
 # parameters for vessel list 
 # date range to run analysis off. Need hard end date for open voyages
 
-start_date <- "'2026-04-30 23:59:59 UTC'"
+start_date <- "'2026-03-01 00:00:00 UTC'"
 end_date <- "'2026-06-01 00:00:00 UTC'" 
 
 # activity range to look in  
@@ -249,8 +249,16 @@ nrow(dfo_voi_dataset_url_v2)
 nrow(full_df_mod)
 colnames(full_df_mod)
 
+npfc_2026_Skylight_v2 <- read.csv(here::here("data","NPG_2026", "NPG_vessels_Skylight_03Jun2026.csv"), header=T)
+npfc_2026_Skylight_v2$MMSI <- as.character(npfc_2026_Skylight_v2$MMSI)
+
+# add the skylight_ prefix
+npfc_2026_Skylight_v2 <- npfc_2026_Skylight_v2 %>% rename_with(~ paste0("skylight_", .))
+# get rid of commas in string 
+npfc_2026_Skylight_v2$skylight_MMSI <- gsub(",", "", npfc_2026_Skylight_v2$skylight_MMSI)
+
 # add Skylight data from v1
-add_skylight_v2 <- left_join(dfo_voi_dataset_url_v2, npfc_2026_Skylight, by=c('ssvid'='skylight_MMSI'))
+add_skylight_v2 <- full_join(dfo_voi_dataset_url_v2, npfc_2026_Skylight_v2, by=c('ssvid'='skylight_MMSI'))
 
 # add last year data columns 
 # just take IHS data and compliance data 
